@@ -367,10 +367,12 @@ CREATE TABLE IF NOT EXISTS irrigation (
 );
 
 -- 灌溉每日分配结果：按农场+绝对天唯一（同日重算覆盖），缺水时前端展示逐地块明细
+-- 注意：abs_day 绝不能加单列 UNIQUE——各农场独立推进游戏日，全局按天唯一会让
+-- 多农场同日结算时 INSERT OR REPLACE 互相吞掉对方农场的当日日报
 CREATE TABLE IF NOT EXISTS irrigation_report (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   farm_id INTEGER NOT NULL,
-  abs_day INTEGER NOT NULL UNIQUE,
+  abs_day INTEGER NOT NULL,
   detail TEXT NOT NULL,
   UNIQUE(farm_id, abs_day)
 );
@@ -495,6 +497,36 @@ CREATE INDEX IF NOT EXISTS idx_members_user ON farm_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_invites_farm ON farm_invites(farm_id);
 CREATE INDEX IF NOT EXISTS idx_claims_farm ON disaster_claims(farm_id);
 `)
+
+// 修复历史 bug：irrigation_report 曾被误建为 abs_day 全局唯一（单列 UNIQUE），
+// 多农场同一游戏日结算灌溉时，INSERT OR REPLACE 会因该约束吞掉其他农场的当日日报。
+// CREATE TABLE IF NOT EXISTS 不会修正已存在的表，检测到残留的单列唯一索引即重建。
+// 旧约束比新约束更严格，存量数据必然满足 UNIQUE(farm_id, abs_day)，可直接整体拷贝。
+const strayDayUnique = db.prepare('PRAGMA index_list(irrigation_report)').all()
+  .filter((ix) => ix.unique)
+  .some((ix) => {
+    const cols = db.prepare('PRAGMA index_info(' + ix.name + ')').all().map((c) => c.name)
+    return cols.length === 1 && cols[0] === 'abs_day'
+  })
+if (strayDayUnique) {
+  db.exec('BEGIN')
+  try {
+    recreateTable('irrigation_report', `
+      CREATE TABLE irrigation_report (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        farm_id INTEGER NOT NULL,
+        abs_day INTEGER NOT NULL,
+        detail TEXT NOT NULL,
+        UNIQUE(farm_id, abs_day)
+      )`,
+      `INSERT INTO irrigation_report (farm_id,abs_day,detail)
+       SELECT farm_id,abs_day,detail FROM _old_irrigation_report`)
+    db.exec('COMMIT')
+  } catch (e) {
+    try { db.exec('ROLLBACK') } catch { /* 事务可能已结束 */ }
+    throw e
+  }
+}
 
 // 杂交品种 id 从 1000 起，避免与基础作物 crops.id（1..n）冲突；
 // 迁移后的旧存档已保留原品种 id，序列永不回退

@@ -7,7 +7,7 @@
     "dev": "concurrently -k -n SERVER,WEB -c blue,green \"node server/index.js\" \"vite\"",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test server/irrigation-core.test.mjs && node server/production.test.mjs && node server/claims.test.mjs && node server/coop-sync.test.mjs && node server/claim-race.test.mjs"
+    "test": "node --test server/irrigation-core.test.mjs && node --test server/irrigation-report.test.mjs && node server/production.test.mjs && node server/claims.test.mjs && node server/coop-sync.test.mjs && node server/claim-race.test.mjs"
   },
   "dependencies": {
     "express": "^4.19.2",
