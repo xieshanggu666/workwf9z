@@ -367,10 +367,12 @@ CREATE TABLE IF NOT EXISTS irrigation (
 );
 
 -- 灌溉每日分配结果：按农场+绝对天唯一（同日重算覆盖），缺水时前端展示逐地块明细
+-- 注意：唯一约束必须是复合键 (farm_id,abs_day)，不能在 abs_day 上单列 UNIQUE，
+-- 否则不同农场在同一游戏日结算时 INSERT OR REPLACE 会跨农场互相覆盖日报
 CREATE TABLE IF NOT EXISTS irrigation_report (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   farm_id INTEGER NOT NULL,
-  abs_day INTEGER NOT NULL UNIQUE,
+  abs_day INTEGER NOT NULL,
   detail TEXT NOT NULL,
   UNIQUE(farm_id, abs_day)
 );
@@ -495,6 +497,37 @@ CREATE INDEX IF NOT EXISTS idx_members_user ON farm_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_invites_farm ON farm_invites(farm_id);
 CREATE INDEX IF NOT EXISTS idx_claims_farm ON disaster_claims(farm_id);
 `)
+
+// 修正历史建表缺陷：irrigation_report 旧版在 abs_day 上带了全局列级 UNIQUE，
+// 多农场同一游戏日结算时 INSERT OR REPLACE 会跨农场互相覆盖日报行，
+// 导致先结算的农场丢失自己的分水结果（lastReport 读到空/过期数据）。
+// 检测到单列 UNIQUE 时重建为仅复合 UNIQUE(farm_id,abs_day)；按复合键本就幂等，
+// 现存数据不会冲突（被错误覆盖的行已物理丢失，仅能保住未被覆盖的报告）。
+if (tableExists('irrigation_report')) {
+  const ddl = q1("SELECT sql FROM sqlite_master WHERE type='table' AND name='irrigation_report'").sql || ''
+  // 仅当 abs_day 列定义本身带 UNIQUE（而非只通过复合 UNIQUE(farm_id,abs_day) 约束）时才需重建
+  if (/abs_day\s+INTEGER[^,)]*UNIQUE/i.test(ddl)) {
+    db.exec('BEGIN')
+    try {
+      db.exec('ALTER TABLE irrigation_report RENAME TO _old_irrigation_report')
+      db.exec(`
+        CREATE TABLE irrigation_report (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          farm_id INTEGER NOT NULL,
+          abs_day INTEGER NOT NULL,
+          detail TEXT NOT NULL,
+          UNIQUE(farm_id, abs_day)
+        )`)
+      db.exec(`INSERT INTO irrigation_report (farm_id,abs_day,detail)
+               SELECT farm_id,abs_day,detail FROM _old_irrigation_report`)
+      db.exec('DROP TABLE _old_irrigation_report')
+      db.exec('COMMIT')
+    } catch (e) {
+      try { db.exec('ROLLBACK') } catch { /* 事务可能已结束，忽略 */ }
+      throw e
+    }
+  }
+}
 
 // 杂交品种 id 从 1000 起，避免与基础作物 crops.id（1..n）冲突；
 // 迁移后的旧存档已保留原品种 id，序列永不回退
